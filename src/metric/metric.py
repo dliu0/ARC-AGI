@@ -51,18 +51,36 @@ def _cell_accuracy(pred, target):
     return (correct / total) if total else 0.0
 
 
-def arc_grid_accuracy(*args, **kwargs):
-    """Continuous ARC grid metric with textual feedback for the optimizer.
+def _grid_str(grid):
+    """Readable, one-row-per-line rendering of a grid for optimizer feedback.
 
-    Returns ``{"score": float, "feedback": str}``. The score is the mean over
-    test cases of per-cell accuracy, gated on getting the output dimensions
-    right (a dimension mismatch scores 0 for that case, since cell-by-cell
-    comparison is undefined). A perfect exact match on every test case scores
-    1.0 — preserving ARC's strict exact-solution requirement at the top end —
-    while partial progress now yields a non-zero, monotonic signal instead of
-    the old all-or-nothing 0/1. The feedback string explains, per case, what
-    went wrong (parse/shape failures, dimension mismatches, how many cells were
-    wrong) so the reflective optimizer has a gradient to act on.
+    The raw nested-list repr is hard for the reflective LM to reason over; laying
+    each row on its own line preserves the spatial pattern. Falls back to repr()
+    for anything that is not a clean 2D list.
+    """
+    if not isinstance(grid, list) or not grid or not all(isinstance(r, list) for r in grid):
+        return repr(grid)
+    return "\n" + "\n".join(" ".join(str(c) for c in row) for row in grid)
+
+
+def arc_grid_accuracy(*args, **kwargs):
+    """Strict ARC grid metric with answer-revealing feedback (GEPA-style).
+
+    Returns ``{"score": float, "feedback": str}``.
+
+    SCORE is strictly 0.0 or 1.0 per test case (exact match required) — the real
+    ARC objective. Keeping the *score* binary stops partial-credit reward hacking
+    (you cannot inch the number up by getting backgrounds/sizes "closer").
+
+    FEEDBACK gives the reflective optimizer a usable gradient despite the binary
+    score: for each failed case it states how the prediction failed AND shows the
+    correct output grid (plus the prediction beside it for shape-correct misses),
+    rendered one row per line, so the optimizer can infer the rule it missed.
+
+    NOTE: feedback intentionally reveals the gold output. That is the point of a
+    reflective signal, but it means real generalization MUST be judged on the
+    held-out TEST set, which is never read during the run (valset/test traces are
+    deny-guarded so the coding agent cannot simply memorize them).
     """
     test_cases, predictions = _extract(args, kwargs)
 
@@ -80,7 +98,7 @@ def arc_grid_accuracy(*args, **kwargs):
 
         if pred is None:
             case_scores.append(0.0)
-            notes.append(f"case {i}: no prediction returned")
+            notes.append(f"case {i}: no prediction returned. Correct output:{_grid_str(target)}")
             continue
 
         ph, pw = _dims(pred)
@@ -88,32 +106,33 @@ def arc_grid_accuracy(*args, **kwargs):
 
         if ph < 0:
             case_scores.append(0.0)
-            notes.append(f"case {i}: prediction is not a well-formed 2D grid")
+            notes.append(
+                f"case {i}: prediction is not a well-formed 2D grid. Correct output:{_grid_str(target)}"
+            )
             continue
         if (ph, pw) != (th, tw):
             case_scores.append(0.0)
             notes.append(
-                f"case {i}: wrong output dimensions — predicted {ph}x{pw}, expected {th}x{tw}"
+                f"case {i}: wrong output dimensions — predicted {ph}x{pw}, expected {th}x{tw}. "
+                f"Correct output:{_grid_str(target)}"
             )
             continue
 
         acc = _cell_accuracy(pred, target)
-        case_scores.append(acc)
         if acc == 1.0:
+            case_scores.append(1.0)
             exact += 1
         else:
+            case_scores.append(0.0)
             wrong = round((1.0 - acc) * th * tw)
             notes.append(
-                f"case {i}: correct shape ({th}x{tw}) but {wrong}/{th * tw} cells wrong "
-                f"({acc * 100:.0f}% cell accuracy)"
+                f"case {i}: correct shape ({th}x{tw}) but {wrong}/{th * tw} cells wrong. "
+                f"Predicted:{_grid_str(pred)}\nCorrect output:{_grid_str(target)}"
             )
 
-    score = sum(case_scores) / n  # each case_score already in [0, 1]
+    score = sum(case_scores) / n  # each case_score is exactly 0.0 or 1.0
 
-    summary = (
-        f"Solved {exact}/{n} test case(s) exactly. "
-        f"Mean cell accuracy {score * 100:.0f}%."
-    )
+    summary = f"Solved {exact}/{n} test case(s) exactly."
     detail = " ".join(notes[:5])
     feedback = (summary + " " + detail).strip() if detail else summary
 
