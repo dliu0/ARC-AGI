@@ -19,7 +19,7 @@ import litellm
 
 class ARCPipeline:
     def __init__(self):
-        self.model = "openai/gpt-5.4-nano"
+        self.model = "openai/gpt-5.4-mini"
 
     def __call__(self, train: list = None, test: list = None, task_id: str = "unknown", **kwargs) -> list:
         with tracer.start_as_current_span("arc_predict") as span:
