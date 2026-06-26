@@ -27,49 +27,51 @@ class ARCPipeline:
             
             train_cases = train or []
             test_cases = test or []
-            
-            # Format the demonstration pairs
-            prompt = "You are an expert at visual and mathematical reasoning. You will be given a few demonstration pairs of input and output grids. You must deduce the abstract transformation rule and apply it to the final test input grid.\n\n"
-            
-            prompt += "Demonstrations:\n"
-            for i, case in enumerate(train_cases):
-                prompt += f"Pair {i+1}:\n"
-                prompt += f"Input: {json.dumps(case.get('input'))}\n"
-                prompt += f"Output: {json.dumps(case.get('output'))}\n\n"
-            
-            outputs = []
-            for test_case in test_cases:
-                test_input = test_case.get("input", [])
-                
-                test_prompt = prompt + f"Test Case:\nInput: {json.dumps(test_input)}\n\n"
-                test_prompt += "Please output ONLY a valid JSON array of arrays (representing the output grid) and nothing else. No markdown formatting or explanation."
-                
-                try:
-                    response = litellm.completion(
-                        model=self.model,
-                        messages=[{"role": "user", "content": test_prompt}],
-                        temperature=0.0
-                    )
-                    content = response.choices[0].message.content.strip()
-                    
-                    # Try to parse the content as a JSON array
-                    if content.startswith("```json"):
-                        content = content.split("```json")[1]
-                    if content.startswith("```"):
-                        content = content.split("```")[1]
-                    if content.endswith("```"):
-                        content = content.rsplit("```", 1)[0]
-                        
-                    content = content.strip()
-                    prediction = json.loads(content)
-                    
-                    if isinstance(prediction, list) and all(isinstance(row, list) for row in prediction):
-                        outputs.append(prediction)
-                    else:
-                        outputs.append(test_input)  # Fallback
-                except Exception as e:
-                    print(f"Error calling LLM or parsing response: {e}")
-                    outputs.append(test_input)  # Fallback on error
+            prompt = (
+                "Infer the ARC rule from all demonstrations, then solve every test input.\n"
+                "First determine the exact output canvas size from the demonstrations.\n"
+                "Verify the rule against every demo pair before answering.\n"
+                "Do not copy the test input unless the demonstrations prove the output is identical.\n"
+                "Return only valid JSON in the exact form {\"predictions\":[grid1, grid2,...]}.\n"
+                "Each grid must be a 2D list of integers, one grid per test input.\n\n"
+            )
+            task_payload = {"train": train_cases, "test": test_cases}
+            prompt += "Task:\n" + json.dumps(task_payload, separators=(",", ":"))
+
+            fallback_outputs = [case.get("input", []) for case in test_cases]
+
+            try:
+                response = litellm.completion(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=384,
+                )
+                content = response.choices[0].message.content.strip()
+
+                if content.startswith("```json"):
+                    content = content.split("```json", 1)[1]
+                if content.startswith("```"):
+                    content = content.split("```", 1)[1]
+                if content.endswith("```"):
+                    content = content.rsplit("```", 1)[0]
+
+                content = content.strip()
+                prediction = json.loads(content)
+                if isinstance(prediction, dict):
+                    prediction = prediction.get("predictions", prediction.get("outputs"))
+
+                if (
+                    isinstance(prediction, list)
+                    and len(prediction) == len(test_cases)
+                    and all(isinstance(grid, list) and all(isinstance(row, list) for row in grid) for grid in prediction)
+                ):
+                    outputs = prediction
+                else:
+                    outputs = fallback_outputs
+            except Exception as e:
+                print(f"Error calling LLM or parsing response: {e}")
+                outputs = fallback_outputs
             
             span.set_attribute("num_predictions", len(outputs))
             return outputs
