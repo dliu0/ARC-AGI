@@ -19,16 +19,13 @@ import litellm
 
 class ARCPipeline:
     def __init__(self):
-        # Solver LM: OpenAI gpt-5.4-mini, pinned EXPLICITLY to OpenAI.
-        # The CodeEvolver optimizer routes the *server* process's OPENAI_* env
-        # vars to GMI Cloud (that is how the opencode/reflection optimizer
-        # models reach GLM-5.2-FP8), so this program MUST pass its own api_base
-        # + api_key or its calls would be sent to GMI instead of OpenAI. The
-        # real OpenAI key must reach the server as REAL_OPENAI_API_KEY (set in
-        # the launch env); fall back to OPENAI_API_KEY for standalone runs.
-        self.model = "openai/gpt-5.4-mini"
-        self.api_base = "https://api.openai.com/v1"
-        self.api_key = os.environ.get("REAL_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        # Solver LM: DeepSeek-V4-Flash on GMI Cloud (reasoning=high set on the
+        # call below). In this experiment the optimizer (GLM-5.2) and this solver
+        # both run on GMI, so we pass the GMI endpoint + key explicitly (the
+        # proven GMI-as-OpenAI pattern) rather than relying on OPENAI_* env.
+        self.model = "openai/deepseek-ai/DeepSeek-V4-Flash"
+        self.api_base = "https://api.gmi-serving.com/v1"
+        self.api_key = os.environ.get("GMI_CLOUD_API_KEY") or os.environ.get("GMI_API_KEY")
 
     def __call__(self, train: list = None, test: list = None, task_id: str = "unknown", **kwargs) -> list:
         with tracer.start_as_current_span("arc_predict") as span:
