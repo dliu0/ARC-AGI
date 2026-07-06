@@ -58,6 +58,11 @@ class ARCPipeline:
                         messages=[{"role": "user", "content": test_prompt}],
                         reasoning_effort="high",
                         allowed_openai_params=["reasoning_effort"],
+                        # Bound a hung/stalled request: without an explicit
+                        # timeout litellm waits up to 6000s, and one stuck row
+                        # holds the whole parallel eval hostage.
+                        timeout=2400,
+                        num_retries=1,
                     )
                     content = response.choices[0].message.content.strip()
 
