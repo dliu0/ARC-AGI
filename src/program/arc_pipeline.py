@@ -19,7 +19,16 @@ import litellm
 
 class ARCPipeline:
     def __init__(self):
+        # Solver LM: OpenAI gpt-5.4-mini, pinned EXPLICITLY to OpenAI.
+        # The CodeEvolver optimizer routes the *server* process's OPENAI_* env
+        # vars to GMI Cloud (that is how the opencode/reflection optimizer
+        # models reach GLM-5.2-FP8), so this program MUST pass its own api_base
+        # + api_key or its calls would be sent to GMI instead of OpenAI. The
+        # real OpenAI key must reach the server as REAL_OPENAI_API_KEY (set in
+        # the launch env); fall back to OPENAI_API_KEY for standalone runs.
         self.model = "openai/gpt-5.4-mini"
+        self.api_base = "https://api.openai.com/v1"
+        self.api_key = os.environ.get("REAL_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
 
     def __call__(self, train: list = None, test: list = None, task_id: str = "unknown", **kwargs) -> list:
         with tracer.start_as_current_span("arc_predict") as span:
@@ -47,12 +56,19 @@ class ARCPipeline:
                 try:
                     response = litellm.completion(
                         model=self.model,
+                        api_base=self.api_base,
+                        api_key=self.api_key,
                         messages=[{"role": "user", "content": test_prompt}],
-                        temperature=0.0
+                        reasoning_effort="high",
+                        allowed_openai_params=["reasoning_effort"],
                     )
                     content = response.choices[0].message.content.strip()
-                    
-                    # Try to parse the content as a JSON array
+
+                    # Try to parse the content as a JSON array. Strip any
+                    # <think>...</think> reasoning block defensively.
+                    import re
+                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+
                     if content.startswith("```json"):
                         content = content.split("```json")[1]
                     if content.startswith("```"):
