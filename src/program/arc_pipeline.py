@@ -35,9 +35,20 @@ class ARCPipeline:
             test_cases = test or []
             
             # Format the demonstration pairs
-            prompt = "You are an expert at visual and mathematical reasoning. You will be given a few demonstration pairs of input and output grids. You must deduce the abstract transformation rule and apply it to the final test input grid.\n\n"
-            
-            prompt += "Demonstrations:\n"
+            prompt = (
+                "You are an expert at solving Abstraction and Reasoning Corpus (ARC) tasks.\n\n"
+                "Each task provides demonstration input->output grid pairs (each grid is a 2D array of integers 0-9 representing colors). "
+                "Infer the single abstract transformation rule that maps EVERY train input to its train output, then apply that same rule to the test input.\n\n"
+                "Before answering, reason through these steps:\n"
+                "1. DIMENSIONS: For each train pair, compare input dimensions (rows x cols) to output dimensions. "
+                "Find the consistent relationship (same size, scaled by a factor, cropped, padded, or derived from content). "
+                "The test output MUST follow this same dimensional relationship.\n"
+                "2. COLORS: Identify the background color (most frequent) and note any color mappings or substitutions between input and output.\n"
+                "3. RULE: State the transformation in one sentence. It must explain how every train input becomes its train output.\n"
+                "4. VERIFY: Mentally apply your rule to each train input and check it reproduces the train output exactly. If any pair fails, revise your rule.\n"
+                "5. APPLY: Apply the verified rule to the test input to produce the output grid.\n\n"
+                "Demonstrations:\n"
+            )
             for i, case in enumerate(train_cases):
                 prompt += f"Pair {i+1}:\n"
                 prompt += f"Input: {json.dumps(case.get('input'))}\n"
@@ -48,7 +59,7 @@ class ARCPipeline:
                 test_input = test_case.get("input", [])
                 
                 test_prompt = prompt + f"Test Case:\nInput: {json.dumps(test_input)}\n\n"
-                test_prompt += "Please output ONLY a valid JSON array of arrays (representing the output grid) and nothing else. No markdown formatting or explanation."
+                test_prompt += "Reason step by step, then output the final answer as a JSON array of arrays (the output grid). Put the JSON array on its own line after your reasoning."
                 
                 try:
                     response = litellm.completion(
@@ -66,21 +77,40 @@ class ARCPipeline:
                     )
                     content = response.choices[0].message.content.strip()
 
-                    # Try to parse the content as a JSON array. Strip any
-                    # <think>...</think> reasoning block defensively.
+                    # Strip reasoning blocks and markdown code fences.
                     import re
                     content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                    content = re.sub(r'```(?:json)?\s*', '', content).strip()
 
-                    if content.startswith("```json"):
-                        content = content.split("```json")[1]
-                    if content.startswith("```"):
-                        content = content.split("```")[1]
-                    if content.endswith("```"):
-                        content = content.rsplit("```", 1)[0]
-                        
-                    content = content.strip()
-                    prediction = json.loads(content)
-                    
+                    # Parse the output grid. The model may include reasoning
+                    # text before the final JSON array, so first try a direct
+                    # parse, then fall back to extracting the last balanced
+                    # JSON array from the text.
+                    prediction = None
+                    try:
+                        prediction = json.loads(content)
+                    except json.JSONDecodeError:
+                        depth = 0
+                        start_idx = None
+                        for i, ch in enumerate(content):
+                            if ch == '[':
+                                if depth == 0:
+                                    start_idx = i
+                                depth += 1
+                            elif ch == ']':
+                                depth -= 1
+                                if depth == 0 and start_idx is not None:
+                                    candidate = content[start_idx:i + 1]
+                                    try:
+                                        parsed = json.loads(candidate)
+                                        if isinstance(parsed, list):
+                                            prediction = parsed
+                                    except json.JSONDecodeError:
+                                        pass
+                                    start_idx = None
+                        if prediction is None:
+                            raise ValueError("No valid JSON array found in response")
+
                     if isinstance(prediction, list) and all(isinstance(row, list) for row in prediction):
                         outputs.append(prediction)
                     else:
