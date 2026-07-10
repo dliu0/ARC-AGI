@@ -23,6 +23,20 @@ def _extract(args, kwargs):
         else:
             predictions = pred
 
+    # Keyword form the mounted evaluator uses: fn(output=..., example=Example(row)).
+    # Pull train/test off the example object (attr- or dict-style). Without this,
+    # test_cases stays empty and every row scores 0.0 ("No test cases available").
+    if train_pairs is None and "example" in kwargs:
+        example = kwargs["example"]
+        if hasattr(example, "train"):
+            train_pairs = example.train
+        elif isinstance(example, dict):
+            train_pairs = example.get("train")
+        if hasattr(example, "test"):
+            test_cases = example.test
+        elif isinstance(example, dict):
+            test_cases = example.get("test")
+
     if train_pairs is None:
         train_pairs = kwargs.get("train")
     if test_cases is None:
