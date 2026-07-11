@@ -144,14 +144,10 @@ class ARCPipeline:
             prompt += f"Test {i+1}: {json.dumps(case.get('input', []))}\n"
 
         prompt += (
-            "\nWrite a Python function `transform(grid)` where grid is a 2D list of ints "
-            "and the function returns a 2D list of ints. It must reproduce every demo output exactly.\n"
-            "Also output your predicted output grid(s).\n\n"
-            "Format:\n"
+            "\nPredict the output grid(s). Output a JSON array with one 2D int array per test input:\n"
+            "```json\n[[[...]], [[...]]]\n```\n"
+            "Then write a Python function `transform(grid)` reproducing every demo output exactly:\n"
             "```python\ndef transform(grid):\n    ...\n```\n"
-            "```json\n[[...]]\n```\n"
-            "The json block contains one predicted grid (2D int array) per test input.\n"
-            "Mentally verify your function reproduces every demo output exactly."
         )
         return prompt
 
