@@ -35,7 +35,13 @@ class ARCPipeline:
             test_cases = test or []
             
             # Format the demonstration pairs
-            prompt = "You are an expert at visual and mathematical reasoning. You will be given a few demonstration pairs of input and output grids. You must deduce the abstract transformation rule and apply it to the final test input grid.\n\n"
+            prompt = (
+                "You are an expert at solving ARC-AGI visual reasoning puzzles. "
+                "Grid cells use digits 0-9 as colors (0 is usually background). "
+                "The output grid may have different dimensions than the input. "
+                "Study all demonstration pairs to find the ONE transformation rule "
+                "that maps every input to its output, then apply it to the test input.\n\n"
+            )
             
             prompt += "Demonstrations:\n"
             for i, case in enumerate(train_cases):
@@ -48,7 +54,11 @@ class ARCPipeline:
                 test_input = test_case.get("input", [])
                 
                 test_prompt = prompt + f"Test Case:\nInput: {json.dumps(test_input)}\n\n"
-                test_prompt += "Please output ONLY a valid JSON array of arrays (representing the output grid) and nothing else. No markdown formatting or explanation."
+                test_prompt += (
+                    "Output ONLY a JSON array of arrays representing the output grid. "
+                    "No markdown, no explanation. "
+                    "Before responding, mentally verify your rule reproduces every demonstration output exactly."
+                )
                 
                 try:
                     response = litellm.completion(
@@ -65,21 +75,29 @@ class ARCPipeline:
                         num_retries=1,
                     )
                     content = response.choices[0].message.content.strip()
-
-                    # Try to parse the content as a JSON array. Strip any
-                    # <think>...</think> reasoning block defensively.
                     import re
+
+                    # Strip any <think>...</think> reasoning block defensively.
                     content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
 
-                    if content.startswith("```json"):
-                        content = content.split("```json")[1]
-                    if content.startswith("```"):
-                        content = content.split("```")[1]
-                    if content.endswith("```"):
-                        content = content.rsplit("```", 1)[0]
-                        
+                    # Strip code fences if present.
+                    content = re.sub(r'^```(?:json)?\s*', '', content)
+                    content = re.sub(r'\s*```$', '', content)
                     content = content.strip()
-                    prediction = json.loads(content)
+
+                    # Try direct parse first; if that fails, scan for the
+                    # first valid JSON array-of-arrays in the text.
+                    prediction = None
+                    try:
+                        prediction = json.loads(content)
+                    except json.JSONDecodeError:
+                        # Scan for JSON arrays: find all [...] substrings
+                        for m in re.finditer(r'\[\s*\[.*?\]\s*\]', content, flags=re.DOTALL):
+                            try:
+                                prediction = json.loads(m.group())
+                                break
+                            except json.JSONDecodeError:
+                                continue
                     
                     if isinstance(prediction, list) and all(isinstance(row, list) for row in prediction):
                         outputs.append(prediction)
