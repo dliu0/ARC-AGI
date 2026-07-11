@@ -6,7 +6,6 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 
 # Set up tracing
 provider = TracerProvider()
-# Read endpoint from environment, defaulting to local Jaeger/Collector
 otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318/v1/traces")
 processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint))
 provider.add_span_processor(processor)
@@ -48,10 +47,6 @@ _SAFE_BUILTINS = {
 
 class ARCPipeline:
     def __init__(self):
-        # Solver LM: DeepSeek-V4-Flash on GMI Cloud (reasoning=high set on the
-        # call below). In this experiment the optimizer (GLM-5.2) and this solver
-        # both run on GMI, so we pass the GMI endpoint + key explicitly (the
-        # proven GMI-as-OpenAI pattern) rather than relying on OPENAI_* env.
         self.model = "openai/deepseek-ai/DeepSeek-V4-Flash"
         self.api_base = "https://api.gmi-serving.com/v1"
         self.api_key = os.environ.get("GMI_CLOUD_API_KEY") or os.environ.get("GMI_API_KEY")
@@ -67,71 +62,40 @@ class ARCPipeline:
                 span.set_attribute("num_predictions", 0)
                 return []
 
-            prompt = self._build_prompt(train_cases, test_cases)
+            # --- Phase 1: Direct predictions (per-test-case, focused prompt) ---
+            direct_predictions = self._get_direct_predictions(train_cases, test_cases)
 
-            try:
-                response = litellm.completion(
-                    model=self.model,
-                    api_base=self.api_base,
-                    api_key=self.api_key,
-                    messages=[{"role": "user", "content": prompt}],
-                    reasoning_effort="high",
-                    allowed_openai_params=["reasoning_effort"],
-                    # Bound a hung/stalled request: without an explicit
-                    # timeout litellm waits up to 6000s, and one stuck row
-                    # holds the whole parallel eval hostage.
-                    timeout=2400,
-                    num_retries=1,
-                )
-                content = response.choices[0].message.content.strip()
-            except Exception as e:
-                print(f"Error calling LLM: {e}")
-                outputs = [tc.get("input", []) for tc in test_cases]
-                span.set_attribute("num_predictions", len(outputs))
-                return outputs
+            # --- Phase 2: Transform code (per-task, focused prompt) ---
+            verified_transform = None
+            if train_cases:
+                verified_transform = self._get_verified_transform(train_cases)
 
-            # Strip any <think>...</think> reasoning block defensively.
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
-
-            code = self._extract_code(content)
-            predictions = self._extract_predictions(content, len(test_cases))
-
+            # --- Merge: use verified code output where available, else direct prediction ---
             outputs = []
-
-            # If code found and train pairs exist, try verification
-            if code and train_cases:
-                transform_fn = self._safe_exec_code(code)
-                if transform_fn is not None and self._verify_transform(transform_fn, train_cases):
-                    for i, tc in enumerate(test_cases):
-                        test_input = tc.get("input", [])
-                        result = self._safe_call(transform_fn, test_input)
-                        if result is not None and self._is_valid_grid(result):
-                            outputs.append(result)
-                        elif i < len(predictions) and self._is_valid_grid(predictions[i]):
-                            outputs.append(predictions[i])
-                        else:
-                            outputs.append(test_input)
-                    span.set_attribute("num_predictions", len(outputs))
-                    span.set_attribute("used_verified_code", True)
-                    return outputs
-
-            # Fallback: direct predictions
             for i, tc in enumerate(test_cases):
-                if i < len(predictions) and self._is_valid_grid(predictions[i]):
-                    outputs.append(predictions[i])
+                test_input = tc.get("input", [])
+                if verified_transform is not None:
+                    result = self._safe_call(verified_transform, test_input)
+                    if result is not None and self._is_valid_grid(result):
+                        outputs.append(result)
+                        continue
+                if i < len(direct_predictions) and self._is_valid_grid(direct_predictions[i]):
+                    outputs.append(direct_predictions[i])
                 else:
-                    outputs.append(tc.get("input", []))
+                    outputs.append(test_input)
 
             span.set_attribute("num_predictions", len(outputs))
-            span.set_attribute("used_verified_code", False)
+            span.set_attribute("used_verified_code", verified_transform is not None)
             return outputs
 
-    def _build_prompt(self, train_cases, test_cases):
+    def _get_direct_predictions(self, train_cases, test_cases):
+        """Baseline approach: per-test-case calls with focused 'output ONLY JSON' prompt."""
         prompt = (
-            "You are an expert at solving ARC-AGI visual reasoning puzzles.\n"
+            "You are an expert at solving ARC-AGI visual reasoning puzzles. "
             "Grid cells use digits 0-9 as colors (0 is usually background). "
-            "Output dimensions may differ from input.\n"
-            "Find the ONE rule mapping every demo input to its output.\n\n"
+            "The output grid may have different dimensions than the input. "
+            "Study all demonstration pairs to find the ONE transformation rule "
+            "that maps every input to its output, then apply it to the test input.\n\n"
         )
         prompt += "Demonstrations:\n"
         for i, case in enumerate(train_cases):
@@ -139,84 +103,108 @@ class ARCPipeline:
             prompt += f"Input: {json.dumps(case.get('input'))}\n"
             prompt += f"Output: {json.dumps(case.get('output'))}\n\n"
 
-        prompt += "Test inputs:\n"
-        for i, case in enumerate(test_cases):
-            prompt += f"Test {i+1}: {json.dumps(case.get('input', []))}\n"
+        predictions = []
+        for test_case in test_cases:
+            test_input = test_case.get("input", [])
+            test_prompt = prompt + f"Test Case:\nInput: {json.dumps(test_input)}\n\n"
+            test_prompt += (
+                "Output ONLY a JSON array of arrays representing the output grid. "
+                "No markdown, no explanation. "
+                "Before responding, mentally verify your rule reproduces every demonstration output exactly."
+            )
+            try:
+                response = litellm.completion(
+                    model=self.model,
+                    api_base=self.api_base,
+                    api_key=self.api_key,
+                    messages=[{"role": "user", "content": test_prompt}],
+                    reasoning_effort="high",
+                    allowed_openai_params=["reasoning_effort"],
+                    timeout=2400,
+                    num_retries=1,
+                )
+                content = response.choices[0].message.content.strip()
+                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                content = re.sub(r'^```(?:json)?\s*', '', content)
+                content = re.sub(r'\s*```$', '', content)
+                content = content.strip()
+
+                prediction = None
+                try:
+                    prediction = json.loads(content)
+                except json.JSONDecodeError:
+                    for m in re.finditer(r'\[\s*\[.*?\]\s*\]', content, flags=re.DOTALL):
+                        try:
+                            prediction = json.loads(m.group())
+                            break
+                        except json.JSONDecodeError:
+                            continue
+
+                if isinstance(prediction, list) and all(isinstance(row, list) for row in prediction):
+                    predictions.append(prediction)
+                else:
+                    predictions.append(test_input)
+            except Exception as e:
+                print(f"Error calling LLM or parsing response: {e}")
+                predictions.append(test_input)
+
+        return predictions
+
+    def _get_verified_transform(self, train_cases):
+        """Separate per-task call asking ONLY for transform code. Returns verified transform_fn or None."""
+        prompt = (
+            "You are an expert at ARC-AGI visual reasoning puzzles. "
+            "Grid cells use digits 0-9 as colors (0 is background). "
+            "Find the ONE transformation rule mapping every demo input to its output.\n\n"
+            "Demonstrations:\n"
+        )
+        for i, case in enumerate(train_cases):
+            prompt += f"Pair {i+1}:\n"
+            prompt += f"Input: {json.dumps(case.get('input'))}\n"
+            prompt += f"Output: {json.dumps(case.get('output'))}\n\n"
 
         prompt += (
-            "\nPredict the output grid(s). Output a JSON array with one 2D int array per test input:\n"
-            "```json\n[[[...]], [[...]]]\n```\n"
-            "Then write a Python function `transform(grid)` reproducing every demo output exactly:\n"
-            "```python\ndef transform(grid):\n    ...\n```\n"
+            "Write a Python function `transform(grid)` that takes a 2D list of ints and returns a 2D list of ints. "
+            "It must reproduce EVERY demonstration output exactly when applied to the corresponding input.\n"
+            "Output ONLY the function in a python code block:\n"
+            "```python\ndef transform(grid):\n    ...\n```"
         )
-        return prompt
+        try:
+            response = litellm.completion(
+                model=self.model,
+                api_base=self.api_base,
+                api_key=self.api_key,
+                messages=[{"role": "user", "content": prompt}],
+                reasoning_effort="high",
+                allowed_openai_params=["reasoning_effort"],
+                timeout=2400,
+                num_retries=1,
+            )
+            content = response.choices[0].message.content.strip()
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+        except Exception as e:
+            print(f"Error calling LLM for transform code: {e}")
+            return None
+
+        code = self._extract_code(content)
+        if not code:
+            return None
+        transform_fn = self._safe_exec_code(code)
+        if transform_fn is None:
+            return None
+        if self._verify_transform(transform_fn, train_cases):
+            return transform_fn
+        return None
 
     def _extract_code(self, content):
-        # Prefer python code blocks
         m = re.search(r'```python\s*(.*?)\s*```', content, flags=re.DOTALL)
         if m:
             return m.group(1)
-        # Try any non-json code block
         for m in re.finditer(r'```(\w*)\s*(.*?)\s*```', content, flags=re.DOTALL):
             lang = m.group(1).lower()
             if lang and lang != 'json':
                 return m.group(2)
         return None
-
-    def _extract_predictions(self, content, num_expected):
-        # Try json blocks first
-        for m in re.finditer(r'```json\s*(.*?)\s*```', content, flags=re.DOTALL | re.IGNORECASE):
-            try:
-                preds = json.loads(m.group(1))
-                normalized = self._normalize_predictions(preds, num_expected)
-                if normalized:
-                    return normalized
-            except json.JSONDecodeError:
-                continue
-
-        # Remove python code blocks to avoid parsing code as JSON
-        remaining = re.sub(r'```python\s*.*?\s*```', '', content, flags=re.DOTALL)
-        # Remove other non-json code blocks
-        remaining = re.sub(r'```[a-zA-Z]+\s*.*?\s*```', '', remaining, flags=re.DOTALL)
-
-        # Try direct parse
-        try:
-            preds = json.loads(remaining.strip())
-            normalized = self._normalize_predictions(preds, num_expected)
-            if normalized:
-                return normalized
-        except json.JSONDecodeError:
-            pass
-
-        # Scan for 2D JSON arrays
-        predictions = []
-        for m in re.finditer(r'\[\s*\[.*?\]\s*\]', remaining, flags=re.DOTALL):
-            try:
-                pred = json.loads(m.group())
-                if self._is_valid_grid(pred):
-                    predictions.append(pred)
-                    if len(predictions) >= num_expected:
-                        break
-            except json.JSONDecodeError:
-                continue
-
-        return predictions
-
-    def _normalize_predictions(self, preds, num_expected):
-        if not isinstance(preds, list):
-            return []
-        # 3D array (list of grids)?
-        if len(preds) > 0 and isinstance(preds[0], list) and len(preds[0]) > 0 and isinstance(preds[0][0], list):
-            return [p for p in preds if self._is_valid_grid(p)]
-        # 2D array (single grid)?
-        if self._is_valid_grid(preds):
-            return [preds]
-        # Flat list of grids?
-        result = []
-        for p in preds:
-            if self._is_valid_grid(p):
-                result.append(p)
-        return result
 
     def _is_valid_grid(self, grid):
         if not isinstance(grid, list) or len(grid) == 0:
@@ -258,7 +246,6 @@ class ARCPipeline:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
         except ValueError:
-            # Not in main thread -- call directly
             try:
                 return func(*args)
             except Exception:
