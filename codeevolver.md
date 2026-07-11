@@ -1,0 +1,20 @@
+The entry point file wasn't found at the expected path. Let me search for the actual file structure.
+```
+PARENT_MODULE_PATH: src.program.arc_pipeline.ARCPipeline
+METRIC_MODULE_PATH: src.metric.metric.arc_grid_accuracy
+
+## ARCHITECTURE TITLE: Single-shot LLM ARC Solver Pipeline with Strict Exact-Match Grid Metric
+## ARCHITECTURE SUMMARY:
+The program is a minimal, single-file LLM-based ARC-AGI-1 solver. `ARCPipeline` (`src/program/arc_pipeline.py`) receives a task's demonstration (train) input/output grid pairs and test input grids, constructs a text prompt embedding the JSON-serialized grids, and calls DeepSeek-V4-Flash via litellm (GMI Cloud OpenAI-compatible endpoint) with `reasoning_effort="high"` to generate predicted output grids. Predictions are parsed as JSON arrays-of-arrays and returned for scoring.
+
+The metric `arc_grid_accuracy` (`src/metric/metric.py`) evaluates each prediction with a strict binary per-case score (exact grid match required, 0.0 or 1.0) averaged across test cases, with type-normalized cell comparison. It returns rich textual feedback — including demonstration pairs, cell-by-cell diffs, dimension mismatches, and color-set differences — to guide a reflective optimizer, while intentionally revealing gold outputs so real generalization must be measured on held-out data.
+
+Data is prepared by `split_data.py`, which shuffles the ARC-AGI-1 training+evaluation tasks (seeded) into 80/10/10 train/val/test splits stored in `data_splits/` and `tests/testdata/`. OpenTelemetry tracing is initialized at module load in `arc_pipeline.py` to emit spans to an OTLP endpoint for execution inspection.
+
+## ARCHITECTURE DESCRIPTION:
+`ARCPipeline` (`src/program/arc_pipeline.py`) is the entry point invoked per ARC task row. Its `__call__(train, test, task_id, **kwargs)` method assembles a prompt from the demonstration pairs (JSON-serialized grids), then for each test input appends that input and asks the LLM to output only a JSON array-of-arrays grid. It calls `litellm.completion` against `openai/deepseek-ai/DeepSeek-V4-Flash` on GMI Cloud (`https://api.gmi-serving.com/v1`) with `reasoning_effort="high"`, a 2400s timeout, and 1 retry. The response is stripped of `<think>` blocks and markdown fences, parsed via `json.loads`, validated as a 2D list, and appended to the outputs list; on any error or malformed result it falls back to returning the test input unchanged. OpenTelemetry is set up at import time (`TracerProvider` + `OTLPSpanExporter` via env-configurable endpoint) and wraps the prediction call in an `arc_predict` span carrying `task_id` and `num_predictions` attributes.
+
+The metric `arc_grid_accuracy` (`src/metric/metric.py`) extracts `(train_pairs, test_cases, predictions)` from either DSPy-style positional args or keyword args the evaluator passes (`example=`, `output=`). For each test case it compares the predicted grid to the gold output: missing/malformed/ragged predictions or dimension mismatches score 0.0; equal-dimension grids are scored by exact cell match (type-normalized so `"3"` equals `3`). The per-case score is strictly binary; the overall score is the mean across test cases. The returned `feedback` string includes a solved-count summary, per-failure diagnostics (dimension errors, cell diffs with row/col coordinates, color-set differences, and the full prediction vs. gold grids rendered row-by-row), plus a capped rendering of the demonstration pairs. This feedback is designed to give a reflective optimizer a usable gradient despite the binary score, though it reveals gold outputs — so genuine generalization must be assessed on the held-out test split, which is deny-guarded from the optimizer.
+
+Data preparation is handled by `split_data.py`, which loads all JSON task files from `data/training` and `data/evaluation`, shuffles them with seed 42, and writes 80/10/10 train/val/test splits to `data_splits/trainset.json`, `data_splits/valset.json`, and `tests/testdata/testset.json`. The repository is otherwise the standard ARC-AGI-1 dataset with a browser-based testing interface in `apps/`.
+```
