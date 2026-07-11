@@ -226,7 +226,7 @@ class ARCPipeline:
         return None
 
     def _build_error_feedback(self, transform_fn, exec_err, train_cases):
-        """Build concise error feedback for the repair call."""
+        """Build diagnostic error feedback for the repair call."""
         if transform_fn is None:
             return (
                 f"Your code failed to execute:\n{exec_err}\n\n"
@@ -242,14 +242,36 @@ class ARCPipeline:
         if not failed:
             return None
         feedback = "Your transform function does not reproduce all demonstration outputs. It failed on:\n"
-        for i, case, result, expected in failed[:2]:
-            exp_dims = f"{len(expected)}x{len(expected[0]) if expected else 0}"
-            got_dims = f"{len(result)}x{len(result[0]) if result else 0}" if result is not None else "None"
-            feedback += f"Pair {i+1}: expected {exp_dims}, got {got_dims}.\n"
-            if len(expected) <= 15 and all(len(r) <= 15 for r in expected):
-                feedback += f"Expected: {json.dumps(expected)}\n"
-                if result is not None and len(result) <= 15 and all(len(r) <= 15 for r in result):
-                    feedback += f"Got: {json.dumps(result)}\n"
+        for i, case, result, expected in failed[:3]:
+            exp_h = len(expected)
+            exp_w = len(expected[0]) if expected else 0
+            got_h = len(result) if result else 0
+            got_w = len(result[0]) if result and result[0] else 0
+            feedback += f"Pair {i+1}: expected {exp_h}x{exp_w}, got {got_h}x{got_w}.\n"
+            exp_colors = set()
+            for row in expected:
+                exp_colors.update(row)
+            got_colors = set()
+            if result:
+                for row in result:
+                    got_colors.update(row)
+            if exp_colors != got_colors:
+                feedback += f"  Expected colors {sorted(exp_colors)}, got colors {sorted(got_colors)}.\n"
+            if result and exp_h == got_h and exp_w == got_w:
+                diffs = []
+                for r, (er, gr) in enumerate(zip(expected, result)):
+                    for c, (ev, gv) in enumerate(zip(er, gr)):
+                        if int(ev) != int(gv):
+                            diffs.append((r, c, ev, gv))
+                if diffs:
+                    if len(diffs) <= 20:
+                        feedback += f"  {len(diffs)} cells differ (row,col,expected,got):\n"
+                        for r, c, ev, gv in diffs:
+                            feedback += f"    [{r},{c}] expected {ev} got {gv}\n"
+                    else:
+                        feedback += f"  {len(diffs)} cells differ (too many to list).\n"
+            elif result and exp_h * exp_w <= 225:
+                feedback += f"  Expected: {json.dumps(expected)}\n  Got: {json.dumps(result)}\n"
         feedback += (
             "Fix the function so it reproduces EVERY demonstration output exactly. "
             "Output ONLY the corrected function in a python code block:\n"
