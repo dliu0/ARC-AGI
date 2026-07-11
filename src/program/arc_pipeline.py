@@ -187,12 +187,22 @@ class ARCPipeline:
             print(f"Error calling LLM for transform code: {e}")
             return None
 
-        code = self._extract_code(content)
-        if not code:
+        # Try all code blocks through verification; keep first executable for repair feedback
+        code_blocks = self._extract_all_code(content)
+        if not code_blocks:
             return None
-        transform_fn, exec_err = self._safe_exec_code(code)
-        if transform_fn is not None and self._verify_transform(transform_fn, train_cases):
-            return transform_fn
+        transform_fn = None
+        exec_err = None
+        for code in code_blocks:
+            fn, err = self._safe_exec_code(code)
+            if fn is not None:
+                if self._verify_transform(fn, train_cases):
+                    return fn
+                if transform_fn is None:
+                    transform_fn = fn
+                    exec_err = err
+        if transform_fn is None:
+            _, exec_err = self._safe_exec_code(code_blocks[0])
 
         # --- Single repair attempt with error feedback ---
         feedback = self._build_error_feedback(transform_fn, exec_err, train_cases)
@@ -217,12 +227,13 @@ class ARCPipeline:
             print(f"Error calling LLM for repair: {e}")
             return None
 
-        code = self._extract_code(content)
-        if not code:
+        code_blocks = self._extract_all_code(content)
+        if not code_blocks:
             return None
-        transform_fn, _ = self._safe_exec_code(code)
-        if transform_fn is not None and self._verify_transform(transform_fn, train_cases):
-            return transform_fn
+        for code in code_blocks:
+            fn, _ = self._safe_exec_code(code)
+            if fn is not None and self._verify_transform(fn, train_cases):
+                return fn
         return None
 
     def _build_error_feedback(self, transform_fn, exec_err, train_cases):
@@ -288,6 +299,18 @@ class ARCPipeline:
             if lang and lang != 'json':
                 return m.group(2)
         return None
+
+    def _extract_all_code(self, content):
+        """Extract all python code blocks from content, in order of appearance."""
+        blocks = []
+        for m in re.finditer(r'```python\s*(.*?)\s*```', content, flags=re.DOTALL):
+            blocks.append(m.group(1))
+        if not blocks:
+            for m in re.finditer(r'```(\w*)\s*(.*?)\s*```', content, flags=re.DOTALL):
+                lang = m.group(1).lower()
+                if lang and lang != 'json':
+                    blocks.append(m.group(2))
+        return blocks
 
     def _is_valid_grid(self, grid):
         if not isinstance(grid, list) or len(grid) == 0:
