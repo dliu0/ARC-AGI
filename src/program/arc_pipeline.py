@@ -273,7 +273,7 @@ class ARCPipeline:
         if transform_fn is None:
             return (
                 f"Your code failed to execute:\n{exec_err}\n\n"
-                "Fix the error and output ONLY the corrected function in a python code block:\n"
+                "First state the transformation rule in one sentence, then output the corrected function in a python code block:\n"
                 "```python\ndef transform(grid):\n    ...\n```"
             )
         failed = []
@@ -317,7 +317,7 @@ class ARCPipeline:
                 feedback += f"  Expected: {json.dumps(expected)}\n  Got: {json.dumps(result)}\n"
         feedback += (
             "Fix the function so it reproduces EVERY demonstration output exactly. "
-            "Output ONLY the corrected function in a python code block:\n"
+            "First state the transformation rule in one sentence, then output the corrected function in a python code block:\n"
             "```python\ndef transform(grid):\n    ...\n```"
         )
         return feedback
