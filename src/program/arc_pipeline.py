@@ -28,6 +28,37 @@ def _alarm_handler(signum, frame):
     raise _TransformTimeout()
 
 
+_SAFE_MODULES = {
+    'math': __import__('math'),
+    'itertools': __import__('itertools'),
+    'collections': __import__('collections'),
+    'functools': __import__('functools'),
+    'operator': __import__('operator'),
+    'copy': __import__('copy'),
+    're': __import__('re'),
+    'string': __import__('string'),
+    'statistics': __import__('statistics'),
+    'cmath': __import__('cmath'),
+    'fractions': __import__('fractions'),
+    'bisect': __import__('bisect'),
+    'heapq': __import__('heapq'),
+    'array': __import__('array'),
+    'struct': __import__('struct'),
+    'pprint': __import__('pprint'),
+}
+
+
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name not in _SAFE_MODULES:
+        raise ImportError(f"Import of '{name}' is not allowed")
+    mod = _SAFE_MODULES[name]
+    if fromlist:
+        for attr in fromlist:
+            if not hasattr(mod, attr):
+                raise ImportError(f"cannot import '{attr}' from '{name}'")
+    return mod
+
+
 _SAFE_BUILTINS = {
     'range': range, 'len': len, 'int': int, 'str': str, 'list': list,
     'dict': dict, 'tuple': tuple, 'set': set, 'frozenset': frozenset,
@@ -42,6 +73,7 @@ _SAFE_BUILTINS = {
     'IndexError': IndexError, 'KeyError': KeyError, 'ZeroDivisionError': ZeroDivisionError,
     'StopIteration': StopIteration, 'ArithmeticError': ArithmeticError,
     'OverflowError': OverflowError, 'True': True, 'False': False, 'None': None,
+    '__import__': _safe_import,
 }
 
 
