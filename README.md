@@ -13,10 +13,19 @@ As a reminder, a test-taker is said to solve a task when, upon seeing the task f
 
 ## Task file format
 
-The `data` directory contains two subdirectories:
+The raw upstream corpus (`data/training`, `data/evaluation`) is deliberately NOT
+on this branch. Every task in the blind hold-out was cut from those 800 files by
+`split_data.py`, so shipping them next to the seed program would place a
+readable copy of every held-out answer in the run workspace — under a different
+filename than the fenced hold-out, which defeats both the deny-path fence and
+the runner's holdout sequestration. The corpus and `split_data.py` remain on
+`master` and upstream (github.com/fchollet/ARC).
 
-- `data/training`: contains the task files for training (400 tasks). Use these to prototype your algorithm or to train your algorithm to acquire ARC-relevant cognitive priors.
-- `data/evaluation`: contains the task files for evaluation (400 tasks). Use these to evaluate your final algorithm. To ensure fair evaluation results, do not leak information from the evaluation set into your algorithm (e.g. by looking at the evaluation tasks yourself during development, or by repeatedly modifying an algorithm while using its evaluation score as feedback).
+This branch carries only the two datasets a run uses:
+
+- `data_splits/trainval.json`: the 720-row training pool (train 640 + val 80),
+  built by `scripts/build_trainval.py` and asserted disjoint from the hold-out.
+- `tests/testdata/testset.json`: the blind 80-row hold-out. Never read it.
 
 The tasks are stored in JSON format. Each task JSON file contains a dictionary with two fields:
 
